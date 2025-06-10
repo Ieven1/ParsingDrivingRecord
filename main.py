@@ -246,16 +246,15 @@ def handle_my_schedule(message):
     if str(message.chat.id) != CHAT_ID:
         bot.reply_to(message, "🚫 Доступ запрещён")
         return
-    bot.reply_to(message, "🔄 Получаю ваше расписание...")
     schedule = fetch_my_schedule()
     current_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
     if schedule and schedule[0][0] != "Ошибка" and schedule[0][0] != "Нет данных":
-        text = f"📅 *Ваше расписание вождения* ({current_time}):\n```\n"
+        text = f"📅 *Ваше расписание вождения* ({current_time}):\n\n"
         for date, time, location in sorted(schedule):
             text += f"📅 {date} в 🕒 {time}: 📍 {location}\n"
     else:
-        text = f"😔 *Нет запланированных занятий* ({current_time})\n\n_Попробуйте записаться на новые слоты с помощью /update._ уникальный_"
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+        text = f"*Нет запланированных занятий* ({current_time})\n\n Попробуйте записаться на новые слоты с помощью /update."
+    bot.send_message(message.chat.id, text)
 
 @bot.callback_query_handler(func=lambda call: call.data == "update_schedule")
 def handle_update_button(call):
