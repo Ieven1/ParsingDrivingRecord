@@ -190,7 +190,7 @@ def run_bot():
     bot.polling(none_stop=True)
 
 def run_scheduler():
-    schedule.every(30).minutes.do(check_and_notify)
+    schedule.every(6).hours.do(check_and_notify)
     while True:
         schedule.run_pending()
         time.sleep(1)
