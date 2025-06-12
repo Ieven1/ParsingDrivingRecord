@@ -45,7 +45,7 @@ def send_or_update_telegram_message(message, update=False):
     global last_message_id
     try:
         markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("🔄 Обновить", callback_data="update_schedule"))
+        markup.add(InlineKeyboardButton("Обновить", callback_data="update_schedule"))
 
         if update and last_message_id:
             try:
@@ -54,14 +54,14 @@ def send_or_update_telegram_message(message, update=False):
                     chat_id=CHAT_ID,
                     message_id=last_message_id,
                     reply_markup=markup,
-                    parse_mode="Markdown"
+                    parse_mode=None
                 )
                 logging.info("Сообщение обновлено в Telegram")
                 return
             except Exception as e:
                 logging.warning(f"Ошибка обновления сообщения: {e}")
 
-        sent = bot.send_message(CHAT_ID, message, reply_markup=markup, parse_mode="Markdown")
+        sent = bot.send_message(CHAT_ID, message, reply_markup=markup, parse_mode=None)
         last_message_id = sent.message_id
         logging.info("Отправлено новое сообщение в Telegram")
     except Exception as e:
@@ -125,7 +125,7 @@ def fetch_schedule():
 
     except Exception as e:
         logging.error(f"Ошибка fetch_schedule: {e}")
-        send_or_update_telegram_message(f"❌ *Ошибка при проверке расписания*:\n```{e}```")
+        send_or_update_telegram_message(f"Ошибка при проверке расписания:\n{e}")
         return {}
     finally:
         if driver:
@@ -179,10 +179,18 @@ def check_and_notify():
 
     added = new - old
     now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+
+    def format_date(d_str):
+        try:
+            day = int(d_str)
+            today = datetime.now()
+            return f"{day:02d}.{today.month:02d}.{today.year}"
+        except:
+            return d_str
+
     if added:
-        msg = f"🔔 *Новые слоты* ({now}):\n```\n"
-        msg += "\n".join(f"📅 {d} июня — 🕒 {t}" for d, t in sorted(added))
-        msg += "\n```"
+        msg = f"Новые слоты ({now}):\n"
+        msg += "\n".join(f"{format_date(d)} — {t}" for d, t in sorted(added))
         send_or_update_telegram_message(msg)
 
     cur.execute("DELETE FROM schedule")
@@ -193,14 +201,11 @@ def check_and_notify():
     conn.commit()
     conn.close()
 
-    summary = f"📅 *Расписание* ({now}):\n```\n"
+    summary = f"Расписание ({now}):\n"
     if new_results:
-        summary += "\n".join(
-            f"📅 {d} — 🕒 {', '.join(ts)}" for d, ts in sorted(new_results.items())
-        )
+        summary += "\n".join(f"{format_date(d)} — {', '.join(ts)}" for d, ts in sorted(new_results.items()))
     else:
-        summary += "😔 Нет доступных слотов"
-    summary += "\n```"
+        summary += "Нет доступных слотов"
     send_or_update_telegram_message(summary, update=True)
 
 def run_bot():
@@ -225,30 +230,30 @@ def run_scheduler():
 @bot.message_handler(commands=['update'])
 def handle_update(message):
     if str(message.chat.id) != CHAT_ID:
-        bot.reply_to(message, "🚫 Доступ запрещён")
+        bot.reply_to(message, "Доступ запрещён")
         return
-    bot.reply_to(message, "🔄 Обновляю расписание...")
+    bot.reply_to(message, "Обновляю расписание...")
     Thread(target=check_and_notify).start()
 
 @bot.message_handler(commands=['myschedule'])
 def handle_my_schedule(message):
     if str(message.chat.id) != CHAT_ID:
-        bot.reply_to(message, "🚫 Доступ запрещён")
+        bot.reply_to(message, "Доступ запрещён")
         return
     data = fetch_my_schedule()
     now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
     if data and data[0][0] not in ["Ошибка", "Нет данных"]:
-        text = f"📅 *Ваше расписание* ({now}):\n\n" + "\n".join(f"📅 {d} 🕒 {t} — 📍 {loc}" for d, t, loc in sorted(data))
+        text = f"Ваше расписание ({now}):\n\n" + "\n".join(f"{d} {t} — {loc}" for d, t, loc in sorted(data))
     else:
-        text = f"*Нет запланированных занятий* ({now})"
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+        text = f"Нет запланированных занятий ({now})"
+    bot.send_message(message.chat.id, text, parse_mode=None)
 
 @bot.callback_query_handler(func=lambda c: c.data == "update_schedule")
 def handle_update_button(call):
     if str(call.message.chat.id) != CHAT_ID:
-        bot.answer_callback_query(call.id, "🚫 Доступ запрещён")
+        bot.answer_callback_query(call.id, "Доступ запрещён")
         return
-    bot.answer_callback_query(call.id, "🔄 Обновляю...")
+    bot.answer_callback_query(call.id, "Обновляю...")
     Thread(target=check_and_notify).start()
 
 if __name__ == "__main__":
@@ -256,6 +261,5 @@ if __name__ == "__main__":
     Thread(target=run_bot, daemon=True).start()
     Thread(target=run_scheduler, daemon=True).start()
 
-    # удерживаем главный поток активным
     while True:
         time.sleep(60)
