@@ -1,24 +1,30 @@
+import logging
+from threading import Thread
+import time
+import schedule
+import sqlite3
+from datetime import datetime
+
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
-import sqlite3
-import time
-import schedule
-from threading import Thread
 from telebot import TeleBot
-from telebot.handler_backends import State, StatesGroup
-from telebot.storage import StateMemoryStorage
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+
 from config import TELEGRAM_TOKEN, CHAT_ID, PHONE, PASSWORD
-from datetime import datetime
 
-calendar_url = "https://www.lk.oz-avtoschool.ru/driving-record"
+logging.basicConfig(
+    filename='bot.log',
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
+
 DB_PATH = "schedule.db"
+calendar_url = "https://www.lk.oz-avtoschool.ru/driving-record"
 
-state_storage = StateMemoryStorage()
-bot = TeleBot(TELEGRAM_TOKEN, state_storage=state_storage)
+bot = TeleBot(TELEGRAM_TOKEN)
 last_message_id = None
 
 def init_db():
@@ -33,6 +39,7 @@ def init_db():
     """)
     conn.commit()
     conn.close()
+    logging.info("База данных инициализирована")
 
 def send_or_update_telegram_message(message, update=False):
     global last_message_id
@@ -49,189 +56,171 @@ def send_or_update_telegram_message(message, update=False):
                     reply_markup=markup,
                     parse_mode="Markdown"
                 )
-                print("Сообщение обновлено в Telegram")
+                logging.info("Сообщение обновлено в Telegram")
+                return
             except Exception as e:
-                print(f"Ошибка обновления сообщения: {e}")
-                sent_message = bot.send_message(CHAT_ID, message, reply_markup=markup, parse_mode="Markdown")
-                last_message_id = sent_message.message_id
-                print("Отправлено новое сообщение в Telegram")
-        else:
-            sent_message = bot.send_message(CHAT_ID, message, reply_markup=markup, parse_mode="Markdown")
-            last_message_id = sent_message.message_id
-            print("Отправлено новое сообщение в Telegram")
+                logging.warning(f"Ошибка обновления сообщения: {e}")
+
+        sent = bot.send_message(CHAT_ID, message, reply_markup=markup, parse_mode="Markdown")
+        last_message_id = sent.message_id
+        logging.info("Отправлено новое сообщение в Telegram")
     except Exception as e:
-        print(f"Ошибка отправки в Telegram: {e}")
+        logging.error(f"Ошибка при отправке в Telegram: {e}")
 
 def fetch_schedule():
-    options = webdriver.ChromeOptions()
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--headless")
-    driver = webdriver.Chrome(options=options)
-    wait = WebDriverWait(driver, 10)
-
-    results = {}
+    driver = None
     try:
+        options = webdriver.ChromeOptions()
+        for flag in ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--headless"]:
+            options.add_argument(flag)
+
+        driver = webdriver.Chrome(options=options)
+        wait = WebDriverWait(driver, 10)
         driver.get(calendar_url)
+
         wait.until(EC.presence_of_element_located((By.ID, "student-phone"))).send_keys(PHONE)
         wait.until(EC.presence_of_element_located((By.ID, "student-password"))).send_keys(PASSWORD)
         wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))).click()
-        print("Авторизация выполнена")
+        logging.info("Авторизация выполнена")
 
-        calendar_link = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a.nav-link[href='/driving-record']")))
-        calendar_link.click()
-        print("Открыт календарь")
+        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a.nav-link[href='/driving-record']"))).click()
+        logging.info("Открыт календарь")
 
-        checked_dates = set()
-        max_attempts = 10
-        attempt = 0
+        results = {}
+        checked = set()
 
-        while attempt < max_attempts:
-            attempt += 1
+        for attempt in range(10):
             try:
                 date_input = wait.until(EC.element_to_be_clickable((By.ID, "drivingschedule-date")))
                 date_input.click()
                 wait.until(EC.visibility_of_element_located((By.ID, "ui-datepicker-div")))
-            except TimeoutException:
-                print("Календарь не найден")
-                break
-
-            try:
-                calendar = wait.until(EC.presence_of_element_located((By.ID, "ui-datepicker-div")))
-                available_dates = calendar.find_elements(By.CSS_SELECTOR, "td[data-handler='selectDay'] a.ui-state-default")
-                if not available_dates:
-                    print("Даты не найдены")
+                calendar = driver.find_element(By.ID, "ui-datepicker-div")
+                dates = calendar.find_elements(By.CSS_SELECTOR, "td[data-handler='selectDay'] a.ui-state-default")
+                if not dates:
                     break
 
-                print(f"Найдено {len(available_dates)} дат")
-                found_new_date = False
-                for date in available_dates:
+                for date_elem in dates:
+                    dt = date_elem.text
+                    if dt in checked:
+                        continue
+                    checked.add(dt)
+                    date_elem.click()
                     try:
-                        date_text = date.text
-                        if date_text in checked_dates:
-                            continue
-                        found_new_date = True
-                        print(f"Проверяем дату: {date_text}")
-                        checked_dates.add(date_text)
-
-                        date.click()
-                        try:
-                            time_select = wait.until(EC.element_to_be_clickable((By.ID, "drivingschedule-id_time_period")))
-                            time_select.click()
-                            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#drivingschedule-id_time_period option[value]:not([value=''])")))
-                            options = time_select.find_elements(By.TAG_NAME, "option")
-                            available_times = [option.text for option in options if option.get_attribute("value") and option.text != "Выберите время"]
-                            results[date_text] = available_times if available_times else ["Нет времени"]
-                        except TimeoutException:
-                            results[date_text] = ["Нет времени"]
-
-                        driver.get(calendar_url)
-                        wait.until(EC.element_to_be_clickable((By.ID, "drivingschedule-date")))
-                        break
-                    except StaleElementReferenceException:
-                        print(f"Дата {date_text} устарела, перезагружаем...")
-                        driver.get(calendar_url)
-                        break
-
-                if not found_new_date or len(checked_dates) >= len(available_dates):
-                    print("Все даты проверены")
+                        sel = wait.until(EC.element_to_be_clickable((By.ID, "drivingschedule-id_time_period")))
+                        sel.click()
+                        opts = sel.find_elements(By.TAG_NAME, "option")
+                        times = [o.text for o in opts if o.get_attribute("value") and o.text != "Выберите время"]
+                        results[dt] = times or ["Нет времени"]
+                    except TimeoutException:
+                        results[dt] = ["Нет времени"]
+                    driver.get(calendar_url)
+                    wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a.nav-link[href='/driving-record']"))).click()
                     break
+            except (TimeoutException, StaleElementReferenceException) as e:
+                logging.warning(f"Попытка {attempt+1}: ошибка при сборе расписания: {e}")
+            else:
+                logging.info(f"Результаты после попытки {attempt+1}: {results}")
 
-            except TimeoutException:
-                print("Календарь не загрузился")
-                break
+        return results
 
     except Exception as e:
-        print(f"Ошибка: {e}")
-        send_or_update_telegram_message(f"❌ *Ошибка при проверке расписания*:\n```{str(e)}```")
+        logging.error(f"Ошибка fetch_schedule: {e}")
+        send_or_update_telegram_message(f"❌ *Ошибка при проверке расписания*:\n```{e}```")
+        return {}
     finally:
-        driver.quit()
-
-    return results
+        if driver:
+            driver.quit()
+            logging.info("WebDriver завершён")
 
 def fetch_my_schedule():
-    options = webdriver.ChromeOptions()
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--headless")
-    driver = webdriver.Chrome(options=options)
-    wait = WebDriverWait(driver, 10)
-
-    results = []
+    driver = None
     try:
+        options = webdriver.ChromeOptions()
+        for flag in ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--headless"]:
+            options.add_argument(flag)
+        driver = webdriver.Chrome(options=options)
+        wait = WebDriverWait(driver, 10)
+
         driver.get(calendar_url)
         wait.until(EC.presence_of_element_located((By.ID, "student-phone"))).send_keys(PHONE)
         wait.until(EC.presence_of_element_located((By.ID, "student-password"))).send_keys(PASSWORD)
         wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))).click()
-        print("Авторизация выполнена")
+        logging.info("Авторизация для personal schedule")
 
-        calendar_link = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a.nav-link[href='/driving-record']")))
-        calendar_link.click()
-        print("Открыт календарь")
+        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a.nav-link[href='/driving-record']"))).click()
+        logging.info("Открытие раздела личного расписания")
 
-        try:
-            schedule_table = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table.table-hover")))
-            rows = schedule_table.find_elements(By.TAG_NAME, "tr")
-            for row in rows[1:]:  # Пропускаем заголовок
-                cols = row.find_elements(By.TAG_NAME, "td")
-                if len(cols) >= 2:
-                    date_time = cols[0].text.split('\n')  # Разделяем дату и время
-                    date = date_time[0] if date_time else ""
-                    time = date_time[1] if len(date_time) > 1 else ""
-                    location = cols[1].text
-                    if date and time:
-                        results.append((date, time, location))
-        except TimeoutException:
-            print("Таблица расписания не найдена")
-            results.append(("Нет данных", "Нет запланированных занятий", ""))
-
+        rows = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table.table-hover"))).find_elements(By.TAG_NAME, "tr")[1:]
+        output = []
+        for row in rows:
+            cols = row.find_elements(By.TAG_NAME, "td")
+            if len(cols) >= 2:
+                dtime = cols[0].text.split('\n')
+                if len(dtime) >= 2:
+                    output.append((dtime[0], dtime[1], cols[1].text))
+        return output or [("Нет данных", "", "")]
     except Exception as e:
-        print(f"Ошибка при получении расписания: {e}")
-        results.append(("Ошибка", str(e), ""))
+        logging.error(f"Ошибка fetch_my_schedule: {e}")
+        return [("Ошибка", str(e), "")]
     finally:
-        driver.quit()
-
-    return results
+        if driver:
+            driver.quit()
+            logging.info("WebDriver personal schedule завершён")
 
 def check_and_notify():
+    logging.info("Запуск check_and_notify")
     new_results = fetch_schedule()
+
     conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+    cur = conn.cursor()
+    cur.execute("SELECT date, time FROM schedule")
+    old = {(r[0], r[1]) for r in cur.fetchall()}
+    new = {(d, t) for d, times in new_results.items() for t in times if t != "Нет времени"}
 
-    cursor.execute("SELECT date, time FROM schedule")
-    old_schedule = {(row[0], row[1]) for row in cursor.fetchall()}
+    added = new - old
+    now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    if added:
+        msg = f"🔔 *Новые слоты* ({now}):\n```\n"
+        msg += "\n".join(f"📅 {d} июня — 🕒 {t}" for d, t in sorted(added))
+        msg += "\n```"
+        send_or_update_telegram_message(msg)
 
-    new_schedule = {(comp_date, time) for comp_date, times in new_results.items() for time in times if time != "Нет времени"}
-
-    new_slots = new_schedule - old_schedule
-    current_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-    if new_slots:
-        message = f"🔔 *Новые слоты для вождения* ({current_time}):\n```\n"
-        for date, time in sorted(new_slots):
-            message += f"📅 {date} июня в 🕒 {time}\n"
-        message += "```\n_Запишитесь, пока слоты доступны!_"
-        send_or_update_telegram_message(message)
-
-    cursor.execute("DELETE FROM schedule")
-    for date, times in new_results.items():
-        for time in times:
-            if time != "Нет времени":
-                cursor.execute("INSERT INTO schedule (date, time) VALUES (?, ?)", (date, time))
+    cur.execute("DELETE FROM schedule")
+    for d, times in new_results.items():
+        for t in times:
+            if t != "Нет времени":
+                cur.execute("INSERT INTO schedule (date, time) VALUES (?, ?)", (d, t))
     conn.commit()
     conn.close()
 
-    message = f"📅 *Расписание доступных слотов* ({current_time}):\n```\n"
+    summary = f"📅 *Расписание* ({now}):\n```\n"
     if new_results:
-        for date, times in sorted(new_results.items()):
-            time_str = ", ".join(times) if times != ["Нет времени"] else "Нет времени"
-            message += f"📅 {date} июня: 🕒 {time_str}\n"
-        message += "```"
+        summary += "\n".join(
+            f"📅 {d} — 🕒 {', '.join(ts)}" for d, ts in sorted(new_results.items())
+        )
     else:
-        message += "😔 Нет доступных слотов\n```"
-    message += "\n_Нажмите 'Обновить' для проверки новых слотов._"
-    send_or_update_telegram_message(message, update=True)
+        summary += "😔 Нет доступных слотов"
+    summary += "\n```"
+    send_or_update_telegram_message(summary, update=True)
+
+def run_bot():
+    while True:
+        try:
+            logging.info("Запуск bot.polling()")
+            bot.polling(none_stop=True)
+        except Exception as e:
+            logging.error(f"Bot polling error: {e}")
+            time.sleep(10)
+
+def run_scheduler():
+    schedule.every(6).hours.do(check_and_notify)
+    while True:
+        try:
+            schedule.run_pending()
+            time.sleep(1)
+        except Exception as e:
+            logging.error(f"Scheduler error: {e}")
+            time.sleep(10)
 
 @bot.message_handler(commands=['update'])
 def handle_update(message):
@@ -239,41 +228,34 @@ def handle_update(message):
         bot.reply_to(message, "🚫 Доступ запрещён")
         return
     bot.reply_to(message, "🔄 Обновляю расписание...")
-    check_and_notify()
+    Thread(target=check_and_notify).start()
 
 @bot.message_handler(commands=['myschedule'])
 def handle_my_schedule(message):
     if str(message.chat.id) != CHAT_ID:
         bot.reply_to(message, "🚫 Доступ запрещён")
         return
-    schedule = fetch_my_schedule()
-    current_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-    if schedule and schedule[0][0] != "Ошибка" and schedule[0][0] != "Нет данных":
-        text = f"📅 *Ваше расписание вождения* ({current_time}):\n\n"
-        for date, time, location in sorted(schedule):
-            text += f"📅 {date} в 🕒 {time}: 📍 {location}\n"
+    data = fetch_my_schedule()
+    now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    if data and data[0][0] not in ["Ошибка", "Нет данных"]:
+        text = f"📅 *Ваше расписание* ({now}):\n\n" + "\n".join(f"📅 {d} 🕒 {t} — 📍 {loc}" for d, t, loc in sorted(data))
     else:
-        text = f"*Нет запланированных занятий* ({current_time})\n\n Попробуйте записаться на новые слоты с помощью /update."
-    bot.send_message(message.chat.id, text)
+        text = f"*Нет запланированных занятий* ({now})"
+    bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
-@bot.callback_query_handler(func=lambda call: call.data == "update_schedule")
+@bot.callback_query_handler(func=lambda c: c.data == "update_schedule")
 def handle_update_button(call):
     if str(call.message.chat.id) != CHAT_ID:
         bot.answer_callback_query(call.id, "🚫 Доступ запрещён")
         return
-    bot.answer_callback_query(call.id, "🔄 Обновляю расписание...")
-    check_and_notify()
-
-def run_bot():
-    bot.polling(none_stop=True)
-
-def run_scheduler():
-    schedule.every(6).hours.do(check_and_notify)
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
+    bot.answer_callback_query(call.id, "🔄 Обновляю...")
+    Thread(target=check_and_notify).start()
 
 if __name__ == "__main__":
     init_db()
-    Thread(target=run_bot).start()
-    Thread(target=run_scheduler).start()
+    Thread(target=run_bot, daemon=True).start()
+    Thread(target=run_scheduler, daemon=True).start()
+
+    # удерживаем главный поток активным
+    while True:
+        time.sleep(60)
